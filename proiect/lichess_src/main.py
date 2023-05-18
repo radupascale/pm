@@ -9,6 +9,9 @@ import cairosvg
 import cv2
 import os
 from pprint import pprint
+from time import sleep
+import msvcrt
+import subprocess
 
 RANKS = 8
 FILES = 8
@@ -63,9 +66,10 @@ class Displayer(threading.Thread):
 	Args:
 		threading (_type_): _description_
 	"""
-	def __init__(self, **kwargs):
+	def __init__(self, position_mutex : threading.Lock, **kwargs):
 		super().__init__(**kwargs)
 		self.daemon = True
+		self.position_mutex = position_mutex
 		self.board_path_svg = "images/current_position.svg"
 		self.board_path_png = "images/current_position.png"
 		self.new_file = "images/new_position.svg"
@@ -74,11 +78,13 @@ class Displayer(threading.Thread):
 	def run(self):
 		while True:
 			if os.path.exists(self.new_file):
-				# TO DO: ADD SYNCHRONIZATION HERE
 				# Delete the current position file and rename the new position file
-				os.remove(self.board_path_svg)
+				self.position_mutex.acquire()
+				if os.path.exists(self.board_path_svg):
+					os.remove(self.board_path_svg)
 				os.rename(self.new_file, self.board_path_svg)
 				self.display_board()
+				self.position_mutex.release()
 			cv2.waitKey(1)
 
 
@@ -92,53 +98,85 @@ class Displayer(threading.Thread):
 		cv2.imshow(self.window_name, image)
 
 class Reader(threading.Thread):
-	def __init__(self, arduino, color,debug = True, **kwargs):
+	def __init__(self, arduino, color, board, stop_event, debug = True, **kwargs):
 		super().__init__(**kwargs)
 		# self.daemon = True
 		self.arduino = arduino
-		self.board = chess.Board()
+		self.board = board
 		self.debug = debug
 		self.new_file = "images/new_position.svg"
-		self.color = color # The color of the player
+		self.color = color
+		self.stop_event = stop_event
 
 	def create_new_board_file(self):
+		self.position_mutex.acquire()
 		with open(self.new_file, "w") as f:
 			f.write(chess.svg.board(board = self.board))
+		self.position_mutex.release()
 
 	def create_displayer(self):
+		self.position_mutex = threading.Lock() 
 		self.create_new_board_file()
-		displayer = Displayer()
+		displayer = Displayer(self.position_mutex)
 		displayer.start()
 
-	def update_current_board(self, data):
-		# The data is received from the eight rank to the first rank and from the first file to the eighth file
-		from_fen = self.fen_to_board(self.board.fen())
-
-		# First of all, check if the player castled
-		if self.color == chess.WHITE:
-			pass
-
+	def check_castled(self, data):
 		src_square = None
 		dest_square = None
+		if self.color == chess.WHITE:
+			king_square = self.board.king(chess.WHITE)
+			# If the king has moved two squares to the left, the player has castled queenside
+			if self.board.has_queenside_castling_rights(chess.WHITE) and data[chess.A1:chess.E1 + 1].hex() == '0101000001':
+				src_square = chess.square_name(king_square)
+				dest_square = chess.square_name(king_square - 2)
+			# If the king has moved two squares to the right, the player has castled kingside
+			elif self.board.has_kingside_castling_rights(chess.WHITE) and data[chess.E1:chess.H1+1].hex() == '01000001':
+				src_square = chess.square_name(king_square)
+				dest_square = chess.square_name(king_square + 2)
+		elif self.color == chess.BLACK:
+			# Same as above, just change the values to the 8th rank
+			king_square = self.board.king(chess.BLACK)
+			if self.board.has_queenside_castling_rights(chess.BLACK) and data[chess.A8:chess.E8 + 1].hex() == '0101000001':
+				src_square = chess.square_name(king_square)
+				dest_square = chess.square_name(king_square - 2)
+			elif self.board.has_kingside_castling_rights(chess.BLACK) and data[chess.E8:chess.H8+1].hex() == '01000001':
+				src_square = chess.square_name(king_square)
+				dest_square = chess.square_name(king_square + 2)
+		return src_square, dest_square
 
-		for i in range(RANKS):
-			for j in range(FILES):
-				# First determine the source square and the destination square
-				# 0 means that there is a piece on the square, 1 means that the square is empty
-				if from_fen[i][j] == '' and data[i * RANKS + j] == 0:
-					dest_square = chess.square_name(chess.square(j, RANKS - i - 1))
-				elif from_fen[i][j] != '' and data[i * RANKS + j] != 0:
-					src_square = chess.square_name(chess.square(j, RANKS - i - 1))
-				# CASE 1: PIECE MOVED TO AN EMPTY SQUARE
+	def update_current_board(self, data):
+		piece_map = self.board.piece_map()
+		previous_piece_count = len(piece_map)
+		current_piece_count = data.count(0)
 
-				# CASE 2: PIECE TOOK ANOTHER PIECE
+		# TO DO CASE 1: CHECK IF THE PLAYER CASTLED (values should be not None)
+		src_square, dest_square = self.check_castled(data)
 
-				# CASE 3: CASTLING
+		# CASE 2: PIECE MOVED TO AN EMPTY SQUARE
+		if not src_square and previous_piece_count == current_piece_count:
+			for i in range(RANKS):
+				for j in range(FILES):
+					if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map:
+						src_square = chess.square_name(i * RANKS + j)
+					if data[i * RANKS + j] == 0 and i * RANKS + j not in piece_map:
+						dest_square = chess.square_name(i * RANKS + j)
+		# TO DO CASE 3: PIECE TOOK ANOTHER PIECE
+		elif not src_square and previous_piece_count == current_piece_count + 1:
+			for i in range(RANKS):
+				for j in range(FILES):
+					if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map:
+						src_square = chess.square_name(i * RANKS + j)
+						break
+			for square in self.board.attacks(chess.parse_square(src_square)):
+				if data[square] == 0 and square in piece_map and piece_map[square].color != piece_map[chess.parse_square(src_square)].color:
+					dest_square = chess.square_name(square)
+					break
 
-				# CASE 4: EN PASSANT
+		# TO DO CASE 4: EN PASSANT
 
-				# CASE 5: PAWN PROMOTION
-		move = "0000" # UCI format for null move
+		# TO DO CASE 5: PAWN PROMOTION
+
+		move = "0000" # UCI format for null move 
 		if src_square and dest_square:
 			move = src_square + dest_square
 
@@ -159,52 +197,92 @@ class Reader(threading.Thread):
 			print("Illegal move: " + move)
 			return
 
-	def fen_to_board(self, fen):
-		board = []
-		for row in fen.split('/'):
-			brow = []
-			for c in row:
-				if c == ' ':
-					break
-				elif c in '12345678':
-					brow.extend( [''] * int(c))
-				elif c == 'p':
-					brow.append('bp')
-				elif c == 'P':
-					brow.append('wp')
-				elif c > 'Z':
-					brow.append('b'+c.upper())
+	def print_arduino_data(self, data):
+		for i in range(RANKS):
+			for j in range(FILES):
+				if data[i * RANKS + j] == 1:
+					print("-", end=' ')
 				else:
-					brow.append('w'+c)
+					print("X", end=' ')
+			print()
+		print()
 
-			board.append(brow)
-		return board
+	def validate_position(self, data):
+		piece_map = self.board.piece_map()
+		for i in range(RANKS):
+			for j in range(FILES):
+				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map:
+					# TO DO: SEND THIS INFORMATION TO THE ARDUINO
+					print("[ERROR]: The board is not in the correct position.")
+					return False
+		print("The board is in the correct position.")
+		return True
 
 	def run(self):
 		if self.debug:
 			self.create_displayer()
 		self.listen_for_data()
 
+
 	def listen_for_data(self):
-		while True:
+		should_validate = True
+		while not self.stop_event.is_set():
 			data = self.arduino.get_serial_data()
-			# # If the first byte of data has the value 'B', we have received the board state
+			# If the first byte of data has the value 'B', we have received the board state
 			if not data:
 				continue
-			
-			data = data.strip()
-			pprint(data)
 
-			if data[0] == BOARD_STATE_CHANGE:
-				self.update_current_board(data[1:])
+			command = data[0]
+			data = data.strip()[1:] # Remove the command byte and the newline character
+			self.print_arduino_data(data)
+
+			if command == BOARD_STATE_CHANGE:
+				# The data is received from the eight rank to the first rank and from the first file to the eighth file
+				# So we reverse it in chunks of 1 byte at a time to not get too confused with the indices
+				data = b''.join(reversed([data[x:x+8] for x in range(0, len(data), 8)]))
+				# TO DO: If this is the first time we are receiving the board, validate the board state
+				if should_validate:
+					should_validate = not self.validate_position(data) # This returns True if the position is valid
+				else:
+					self.update_current_board(data)
+
+def read_kbd_input(inputQueue):
+	"""h ttps://stackoverflow.com/questions/5404068/how-to-read-keyboard-input/53344690#53344690
+
+	Args:
+		inputQueue (_type_): _description_
+	"""
+	print('Ready for keyboard input:')
+	while (True):
+		input_str = input()
+		inputQueue.put(input_str)
 
 if __name__ == '__main__':
+	# Hardcoded variables to disable and enable the Arduino USB port before connecting to the serial port
+	# I have to run the program as administrator for this to work
+	devcon = 'C:\\Program Files (x86)\\Windows Kits\\10\\Tools\\10.0.22621.0\\x64\\devcon.exe'
+	hwid = "USB\VID_1A86&PID_7523"
+	subprocess.run([devcon, 'disable', hwid])
+	subprocess.run([devcon, 'enable', hwid])
+
+	board = None
+	with open('fen.in', 'r') as f:
+		fen = f.read()
+		if fen:
+			board = chess.Board(fen)
+		else:
+			board = chess.Board()
+
 	# Connect to Arduino serial port
 	arduino = Arduino()
 
 	# Create a thread which listens to the Arduino for input
-	reader_thread = Reader(arduino=arduino, color = chess.WHITE)
+	stop_event = threading.Event()
+	reader_thread = Reader(arduino=arduino, color = chess.WHITE, board = board, stop_event = stop_event)
 	reader_thread.start()
+
+	# while (True):
+	# 	sleep(100)
 
 	# Connect to the Lichess server using a bot account and listen for events
 	# client = start_session()
