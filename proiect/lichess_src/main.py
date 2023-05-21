@@ -20,48 +20,99 @@ FILES = 8
 BOARD_STATE_CHANGE = 66
 
 def start_session():
-	with open(".token", "r") as token_file:
+	with open("./utils/.token", "r") as token_file:
 		API_TOKEN = token_file.read()
 		session = berserk.TokenSession(API_TOKEN)
 		return berserk.Client(session=session)
 
 class Game(threading.Thread):
-	def __init__(self, client, game_id, arduino, **kwargs):
+	def __init__(self, client, gameStartEvent, arduino, **kwargs):
 		super().__init__(**kwargs)
-		self.game_id = game_id
+		self.game_id = gameStartEvent['game']['gameId']
+		self.color = gameStartEvent['game']['color'] == 'white'
 		self.client = client
-		self.stream = client.bots.stream_game_state(game_id)
+		self.stream = client.bots.stream_game_state(self.game_id)
 		self.current_state = next(self.stream)
-		self.board = chess.Board()
+		self.board = chess.Board(fen = gameStartEvent['game']['fen'])
+		self.board_lock = threading.Lock()
 		self.arduino = arduino
+		self.stop_event = threading.Event()
+		self.move_event = threading.Event()
+		self.reader = Reader(arduino=self.arduino, board = self.board, stop_event = self.stop_event, board_lock = self.board_lock, move_event = self.move_event, color = self.color, debug = False)
+
+	def spawn_move_thread(self):
+		"""
+		Createa a new daemon thread which sends the move to Lichess.
+		"""
+		moveThread = threading.Thread(target=self.make_move)
+		moveThread.daemon = True
+		moveThread.start()
+
+	def make_move(self):
+		"""
+		Wait for the Reader thread to signal that a move has been made and then send it to Lichess.
+		"""
+		self.move_event.wait()
+		self.client.bots.make_move(self.game_id, self.board.peek().uci())
+		self.move_event.clear()
 
 	def run(self):
 		"""
 		TO DO: Handle moves, chat message, and game state changes such as game end or opponent disconnect
 		"""
+		self.reader.start()
+		stop = False
+		# If it is our turn, play a move before listening for events
+		if self.board.turn == self.color:
+			self.spawn_move_thread()
+
 		for event in self.stream:
+			print("Received game event :{event}".format(event=event))
 			if event['type'] == 'gameState':
-				self.handle_state_change(event)
+				stop = self.handle_state_change(event)
 			elif event['type'] == 'chatLine':
 				self.handle_chat_line(event)
+			elif event['type'] == 'opponentGone':
+				self.handle_opponent_gone(event)
+			if stop:
+				break
+		threading.Thread.join(self.reader)
 
 	def handle_state_change(self, game_state):
 		"""
 		TO DO: If opponent concedes or the game ends, clean up and close the thread.
 		TO DO: If it is the opponents turn, listen for a new gameState, but also check whether or not we have received info from the Arduino
 		TO DO: If it our turn, simply check if we have received input from the Arduino
-
 		Args:
 			game_state (_type_): _description_
 		"""
+		if game_state['status'] == 'started':
+			last_move = game_state['moves'].split()[-1]
+			try:
+				# If the last move is the same as the last move we made, don't make a move.
+				if last_move == self.board.peek().uci():
+					return False
+			except IndexError:
+				# No move has been added to the board yet
+				pass
+			self.board_lock.acquire()
+			self.board.push_uci(last_move)
+			self.board_lock.release()
+			self.spawn_move_thread()
+		elif game_state['status'] == 'aborted' or game_state['status'] == 'mate' or game_state['status'] == 'resign' or game_state['status'] == 'outoftime' or game_state['status'] == 'stalemate':
+			# Maybe add these in a list and check if the status is in the list
+			self.stop_event.set()
+			return True
+		return False
+
 		
 		# Handle the board received from the Arduino, find out what move has been made, and if it is legal, send it to Lichess
 
 	def handle_chat_line(self, chat_line):
 		pass
 
-	def handle_move(self, new_board):
-		current_board = self.board()
+	def handle_opponent_gone(self, opponent_gone):
+		pass
 
 class Displayer(threading.Thread):
 	""" Class used for debugging purposes. Displays the current board state in a window.
@@ -100,14 +151,17 @@ class Displayer(threading.Thread):
 		cv2.imshow(self.window_name, image)
 
 class Reader(threading.Thread):
-	def __init__(self, arduino, color, board : chess.Board, stop_event, debug = True, **kwargs):
+	def __init__(self, arduino : Arduino, board : chess.Board, stop_event : threading.Event, board_lock : threading.Lock, move_event : threading.Event, color, debug = True, **kwargs):
 		super().__init__(**kwargs)
 		# self.daemon = True
 		self.arduino = arduino
 		self.board = board
+		self.color = color
 		self.debug = debug
 		self.new_file = "images/new_position.svg"
 		self.stop_event = stop_event
+		self.move_event = move_event
+		self.board_lock = board_lock
 
 	def create_new_board_file(self):
 		self.position_mutex.acquire()
@@ -130,20 +184,20 @@ class Reader(threading.Thread):
 		if self.board.turn == chess.WHITE:
 			king_square = self.board.king(chess.WHITE)
 			# If the king has moved two squares to the left, the player has castled queenside
-			if board.has_castling_rights(chess.WHITE) and data[chess.A1:chess.E1 + 1].hex() == '0101000001':
+			if self.board.has_castling_rights(chess.WHITE) and data[chess.A1:chess.E1 + 1].hex() == '0101000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square - 2)
 			# If the king has moved two squares to the right, the player has castled kingside
-			elif board.has_castling_rights(chess.WHITE) and data[chess.E1:chess.H1+1].hex() == '01000001':
+			elif self.board.has_castling_rights(chess.WHITE) and data[chess.E1:chess.H1+1].hex() == '01000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square + 2)
 		else:
 			# Same as above, just change the values to the 8th rank
 			king_square = self.board.king(chess.BLACK)
-			if board.has_castling_rights(chess.BLACK) and data[chess.A8:chess.E8 + 1].hex() == '0101000001':
+			if self.board.has_castling_rights(chess.BLACK) and data[chess.A8:chess.E8 + 1].hex() == '0101000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square - 2)
-			elif board.has_castling_rights(chess.BLACK) and data[chess.E8:chess.H8+1].hex() == '01000001':
+			elif self.board.has_castling_rights(chess.BLACK) and data[chess.E8:chess.H8+1].hex() == '01000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square + 2)
 		return src_square, dest_square
@@ -188,9 +242,9 @@ class Reader(threading.Thread):
 		dest_square = None
 		for i in range(RANKS):
 			for j in range(FILES):
-				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map and self.board.piece_at(i * RANKS + j).color == board.turn:
+				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map and self.board.piece_at(i * RANKS + j).color == self.board.turn:
 					src_square = chess.square_name(i * RANKS + j)
-				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map and self.board.piece_at(i * RANKS + j).color != board.turn:
+				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map and self.board.piece_at(i * RANKS + j).color != self.board.turn:
 					dest_square = chess.square_name(i * RANKS + j)
 		return src_square, dest_square
 
@@ -236,7 +290,7 @@ class Reader(threading.Thread):
 		"""
 		src_square, dest_square = move
 		final_move = src_square + dest_square
-		if chess.Move.from_uci(final_move + 'q') in board.legal_moves:
+		if chess.Move.from_uci(final_move + 'q') in self.board.legal_moves:
 			final_move += 'q'
 		return final_move
 
@@ -265,18 +319,21 @@ class Reader(threading.Thread):
 		# If debug is set create a new file with the current board state
 		try:
 			if move != "0000":
-				logging.info(f'Played move: {move}')
+				self.board_lock.acquire()
 				self.board.push_uci(move)
+				self.board_lock.release()
+				logging.info(f'Played move: {move}')
+				self.move_event.set()
 			else:
 				# Send this information to the Arduino
 				logging.warning("Null move")
-				pass
 			
 			if self.debug:
 				self.create_new_board_file()
 		except chess.IllegalMoveError:
 			# Send this information to the arduino
 			logging.warning("Illegal move: " + move)
+			self.board_lock.release()
 			return
 
 	def print_arduino_data(self, data):
@@ -305,9 +362,7 @@ class Reader(threading.Thread):
 			self.create_displayer()
 		self.listen_for_data()
 
-
 	def listen_for_data(self):
-		should_validate = True
 		while not self.stop_event.is_set():
 			data = self.arduino.get_serial_data()
 			# If the first byte of data has the value 'B', we have received the board state
@@ -318,15 +373,12 @@ class Reader(threading.Thread):
 			data = data.strip()[1:] # Remove the command byte and the newline character
 			self.print_arduino_data(data)
 
-			if command == BOARD_STATE_CHANGE:
+			if command == BOARD_STATE_CHANGE and self.color == self.board.turn:
 				# The data is received from the eight rank to the first rank and from the first file to the eighth file
 				# So we reverse it in chunks of 1 byte at a time to not get too confused with the indices
 				data = b''.join(reversed([data[x:x+8] for x in range(0, len(data), 8)]))
-				# TO DO: If this is the first time we are receiving the board, validate the board state
-				if should_validate:
-					should_validate = not self.validate_position(data) # This returns True if the position is valid
-				else:
-					self.update_current_board(data)
+				# Only make a move if its your turn
+				self.update_current_board(data)
 
 if __name__ == '__main__':
 	# Hardcoded variables to disable and enable the Arduino USB port before connecting to the serial port
@@ -343,36 +395,30 @@ if __name__ == '__main__':
 		level=logging.INFO,
 		datefmt='%Y-%m-%d %H:%M:%S')
 
-	board = None
-	with open('fen.in', 'r') as f:
-		fen = f.read()
-		if fen:
-			board = chess.Board(fen)
-		else:
-			board = chess.Board()
+	# board = None
+	# with open('fen.in', 'r') as f:
+	# 	fen = f.read()
+	# 	if fen:
+	# 		board = chess.Board(fen)
+	# 	else:
+	# 		board = chess.Board()
 
 	# Connect to Arduino serial port
 	arduino = Arduino()
 
-	# Create a thread which listens to the Arduino for input
-	stop_event = threading.Event()
-	reader_thread = Reader(arduino=arduino, color = chess.WHITE, board = board, stop_event = stop_event)
-	reader_thread.start()
+	# # Create a thread which listens to the Arduino for input
+	# stop_event = threading.Event()
+	# reader_thread = Reader(arduino=arduino, color = chess.WHITE, board = board, stop_event = stop_event)
+	# reader_thread.start()
 
 	# Connect to the Lichess server using a bot account and listen for events
-	# client = start_session()
-	# stream = client.board.stream_incoming_events()
-	# for event in stream:
-	# 	if event['type'] == 'challenge':
-	# 		client.bots.accept_challenge(event['challenge']['id'])
-	# 	elif event['type'] == 'gameStart':
-	# 		game = Game(client = client, game_id = event['game']['gameId'], arduino=arduino)
-	# 		game.start()
-
-	# TO DO: Send a request to the Arduino to receive the board state
-
-	# TO DO: If this is the first time we are receiving the board, save the position of the pieces
-
-	# TO DO: Print the board state to the console to validate the pieces
-
-	# TO DO: Create an analysis board on Lichess
+	client = start_session()
+	stream = client.board.stream_incoming_events()
+	for event in stream:
+		print("Received event: {event}".format(event=event))
+		if event['type'] == 'challenge':
+			client.bots.accept_challenge(event['challenge']['id'])
+		elif event['type'] == 'gameStart':
+			game = Game(client = client, arduino=arduino, gameStartEvent = event)
+			game.start()
+			threading.Thread.join(game)
