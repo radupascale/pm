@@ -12,6 +12,8 @@ from pprint import pprint
 from time import sleep
 import msvcrt
 import subprocess
+import sys
+import logging
 
 RANKS = 8
 FILES = 8
@@ -98,14 +100,13 @@ class Displayer(threading.Thread):
 		cv2.imshow(self.window_name, image)
 
 class Reader(threading.Thread):
-	def __init__(self, arduino, color, board, stop_event, debug = True, **kwargs):
+	def __init__(self, arduino, color, board : chess.Board, stop_event, debug = True, **kwargs):
 		super().__init__(**kwargs)
 		# self.daemon = True
 		self.arduino = arduino
 		self.board = board
 		self.debug = debug
 		self.new_file = "images/new_position.svg"
-		self.color = color
 		self.stop_event = stop_event
 
 	def create_new_board_file(self):
@@ -123,78 +124,159 @@ class Reader(threading.Thread):
 	def check_castled(self, data):
 		src_square = None
 		dest_square = None
-		if self.color == chess.WHITE:
+		# There is a glitch here if the player tries to castle with no rights. The script will think that the player moved the rook.
+		# If I try to fix it by not checking for castling rights, the script will think that the player tries to castle
+		# if the rook moves near the king and the king is moved two squares to the left or right. 
+		if self.board.turn == chess.WHITE:
 			king_square = self.board.king(chess.WHITE)
 			# If the king has moved two squares to the left, the player has castled queenside
-			if self.board.has_queenside_castling_rights(chess.WHITE) and data[chess.A1:chess.E1 + 1].hex() == '0101000001':
+			if board.has_castling_rights(chess.WHITE) and data[chess.A1:chess.E1 + 1].hex() == '0101000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square - 2)
 			# If the king has moved two squares to the right, the player has castled kingside
-			elif self.board.has_kingside_castling_rights(chess.WHITE) and data[chess.E1:chess.H1+1].hex() == '01000001':
+			elif board.has_castling_rights(chess.WHITE) and data[chess.E1:chess.H1+1].hex() == '01000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square + 2)
-		elif self.color == chess.BLACK:
+		else:
 			# Same as above, just change the values to the 8th rank
 			king_square = self.board.king(chess.BLACK)
-			if self.board.has_queenside_castling_rights(chess.BLACK) and data[chess.A8:chess.E8 + 1].hex() == '0101000001':
+			if board.has_castling_rights(chess.BLACK) and data[chess.A8:chess.E8 + 1].hex() == '0101000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square - 2)
-			elif self.board.has_kingside_castling_rights(chess.BLACK) and data[chess.E8:chess.H8+1].hex() == '01000001':
+			elif board.has_castling_rights(chess.BLACK) and data[chess.E8:chess.H8+1].hex() == '01000001':
 				src_square = chess.square_name(king_square)
 				dest_square = chess.square_name(king_square + 2)
 		return src_square, dest_square
+
+	def check_moved_to_empty_square(self, data, piece_map):
+		"""
+		The MOVED logic is as follows: The player moves the piece to the desired square and sends the request to the script.
+		The script then parses the move and checks if it is legal.
+		Args:
+			data (_type_): _description_
+			piece_map (_type_): _description_
+
+		Returns:
+			_type_: _description_
+		"""
+		src_square = None
+		dest_square = None
+		for i in range(RANKS):
+			for j in range(FILES):
+				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map:
+					src_square = chess.square_name(i * RANKS + j)
+				if data[i * RANKS + j] == 0 and i * RANKS + j not in piece_map:
+					dest_square = chess.square_name(i * RANKS + j)
+
+		return src_square, dest_square
+
+
+	def check_takes(self, data, piece_map):
+		"""
+		The TAKES logic is as follows: The player lifts BOTH pieces from the board and sends the request to the script
+		The script then parses the move and checks if it is legal. If it is, then the player can put the piece that took
+		on the board. If it is not, then the player has to retry sending the move. This is done because the
+		sensors sometimes give false positives.
+		Args:
+			data (_type_): _description_
+			piece_map (_type_): _description_
+
+		Returns:
+			_type_: _description_
+		"""
+		src_square = None
+		dest_square = None
+		for i in range(RANKS):
+			for j in range(FILES):
+				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map and self.board.piece_at(i * RANKS + j).color == board.turn:
+					src_square = chess.square_name(i * RANKS + j)
+				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map and self.board.piece_at(i * RANKS + j).color != board.turn:
+					dest_square = chess.square_name(i * RANKS + j)
+		return src_square, dest_square
+
+	def check_en_passant(self, data, piece_map):
+		"""
+		The en passant logic is as follows: The player moves the pawn that is taking the other pawn to en passant square
+		and then removes the pawn that is being taken from the board. The script then parses the move and checks if it is legal.
+		Args:
+			data (_type_): _description_
+			piece_map (_type_): _description_
+		"""
+		src_square = None
+		dest_square = None
+		if self.board.has_legal_en_passant():
+			en_passant_square = self.board.ep_square
+			
+			if data[en_passant_square] == 0:
+				dest_square = chess.square_name(en_passant_square)
+
+			if self.board.turn == chess.WHITE:
+				# Check the fifth rank for source square
+				rank = 4
+				for file in range(FILES):
+					if data[rank * RANKS + file] == 1:
+						piece = self.board.piece_at(rank * RANKS + file)
+						if piece is not None and piece.symbol() == 'P':
+							src_square = chess.square_name(rank * RANKS + file)
+			else:
+				rank = 3
+				for file in range(FILES):
+					if data[rank * RANKS + file] == 1:
+						piece = self.board.piece_at(rank * RANKS + file)
+						if piece is not None and piece.symbol() == 'p':
+							src_square = chess.square_name(rank * RANKS + file)
+		return src_square, dest_square
+
+	def check_promotion(self, move : str):
+		"""
+		Checks to see if the piece has been promoted. If it has add 'q' to the end of the move.
+
+		Args:
+			move (_type_): String tuple containing the source square and the destination square
+		"""
+		src_square, dest_square = move
+		final_move = src_square + dest_square
+		if chess.Move.from_uci(final_move + 'q') in board.legal_moves:
+			final_move += 'q'
+		return final_move
 
 	def update_current_board(self, data):
 		piece_map = self.board.piece_map()
 		previous_piece_count = len(piece_map)
 		current_piece_count = data.count(0)
 
-		# TO DO CASE 1: CHECK IF THE PLAYER CASTLED (values should be not None)
+		# CASE 1: CHECK IF THE PLAYER CASTLED (values should be not None)
 		src_square, dest_square = self.check_castled(data)
 
 		# CASE 2: PIECE MOVED TO AN EMPTY SQUARE
 		if not src_square and previous_piece_count == current_piece_count:
-			for i in range(RANKS):
-				for j in range(FILES):
-					if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map:
-						src_square = chess.square_name(i * RANKS + j)
-					if data[i * RANKS + j] == 0 and i * RANKS + j not in piece_map:
-						dest_square = chess.square_name(i * RANKS + j)
-		# TO DO CASE 3: PIECE TOOK ANOTHER PIECE
+			src_square, dest_square = self.check_moved_to_empty_square(data, piece_map)
+		# CASE 3: PIECE TOOK ANOTHER PIECE
+		elif not src_square and previous_piece_count == current_piece_count + 2:
+			src_square, dest_square = self.check_takes(data, piece_map)
+		# CASE 4: EN PASSANT
 		elif not src_square and previous_piece_count == current_piece_count + 1:
-			for i in range(RANKS):
-				for j in range(FILES):
-					if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map:
-						src_square = chess.square_name(i * RANKS + j)
-						break
-			for square in self.board.attacks(chess.parse_square(src_square)):
-				if data[square] == 0 and square in piece_map and piece_map[square].color != piece_map[chess.parse_square(src_square)].color:
-					dest_square = chess.square_name(square)
-					break
-
-		# TO DO CASE 4: EN PASSANT
-
-		# TO DO CASE 5: PAWN PROMOTION
+			src_square, dest_square = self.check_en_passant(data, piece_map)
 
 		move = "0000" # UCI format for null move 
 		if src_square and dest_square:
-			move = src_square + dest_square
-
-		print(move)
+			move = self.check_promotion((src_square, dest_square))
 
 		# If debug is set create a new file with the current board state
 		try:
 			if move != "0000":
+				logging.info(f'Played move: {move}')
 				self.board.push_uci(move)
 			else:
 				# Send this information to the Arduino
+				logging.warning("Null move")
 				pass
 			
 			if self.debug:
 				self.create_new_board_file()
 		except chess.IllegalMoveError:
 			# Send this information to the arduino
-			print("Illegal move: " + move)
+			logging.warning("Illegal move: " + move)
 			return
 
 	def print_arduino_data(self, data):
@@ -213,9 +295,9 @@ class Reader(threading.Thread):
 			for j in range(FILES):
 				if data[i * RANKS + j] == 1 and i * RANKS + j in piece_map:
 					# TO DO: SEND THIS INFORMATION TO THE ARDUINO
-					print("[ERROR]: The board is not in the correct position.")
+					logging.error("The board is not in the correct position.")
 					return False
-		print("The board is in the correct position.")
+		logging.info("The board is in the correct position.")
 		return True
 
 	def run(self):
@@ -246,24 +328,20 @@ class Reader(threading.Thread):
 				else:
 					self.update_current_board(data)
 
-def read_kbd_input(inputQueue):
-	"""h ttps://stackoverflow.com/questions/5404068/how-to-read-keyboard-input/53344690#53344690
-
-	Args:
-		inputQueue (_type_): _description_
-	"""
-	print('Ready for keyboard input:')
-	while (True):
-		input_str = input()
-		inputQueue.put(input_str)
-
 if __name__ == '__main__':
 	# Hardcoded variables to disable and enable the Arduino USB port before connecting to the serial port
 	# I have to run the program as administrator for this to work
-	devcon = 'C:\\Program Files (x86)\\Windows Kits\\10\\Tools\\10.0.22621.0\\x64\\devcon.exe'
+	# devcon = 'C:\\Program Files (x86)\\Windows Kits\\10\\Tools\\10.0.22621.0\\x64\\devcon.exe'
+	devcon = '.\\utils\\devcon.exe'
 	hwid = "USB\VID_1A86&PID_7523"
 	subprocess.run([devcon, 'disable', hwid])
 	subprocess.run([devcon, 'enable', hwid])
+
+	# Used for logging
+	logging.basicConfig(
+		format='%(asctime)s %(levelname)-8s %(message)s',
+		level=logging.INFO,
+		datefmt='%Y-%m-%d %H:%M:%S')
 
 	board = None
 	with open('fen.in', 'r') as f:
@@ -280,9 +358,6 @@ if __name__ == '__main__':
 	stop_event = threading.Event()
 	reader_thread = Reader(arduino=arduino, color = chess.WHITE, board = board, stop_event = stop_event)
 	reader_thread.start()
-
-	# while (True):
-	# 	sleep(100)
 
 	# Connect to the Lichess server using a bot account and listen for events
 	# client = start_session()
