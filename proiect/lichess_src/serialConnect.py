@@ -31,7 +31,7 @@ class Arduino():
 		serialConnection = serial.Serial(port = self.device, baudrate = 9600, timeout=1)
 		self.serial = serialConnection
 
-	def send_serial_data(self, data: str):
+	def send_serial_data(self, data: bytes):
 		"""_summary_
 
 		Args:
@@ -47,7 +47,7 @@ class Arduino():
 			except serial.SerialException:
 				print("Could not open serial port. Is the Arduino connected?")
 				return False
-		self.serial.write(data.encode())
+		self.serial.write(data)
 
 	def get_serial_data(self):  
 		"""_summary_
