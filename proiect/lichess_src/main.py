@@ -17,8 +17,9 @@ import logging
 
 RANKS = 8
 FILES = 8
+EMPTY_SPACE = 32
 BOARD_STATE_CHANGE = 66
-BOARD_STATE_INFO = 77
+BOARD_MOVE = 77
 
 class Reader(threading.Thread):
 	def __init__(self, arduino : Arduino, board_lock : threading.Lock, move_event : threading.Event, client, client_2, debug = True,**kwargs):
@@ -31,7 +32,7 @@ class Reader(threading.Thread):
 		self.new_file = "images/new_position.svg"
 		self.move_event = move_event
 		self.board_lock = board_lock
-		self.is_otb = True # TODO: CHANGE THIS BACK TO FALSE
+		self.is_otb = False
 		self.main_bot = client
 		self.bot_friend = client_2 # Used for OTB
 
@@ -215,20 +216,27 @@ class Reader(threading.Thread):
 		except chess.IllegalMoveError:
 			# TODO: Send this information to the arduino
 			logging.warning("Illegal move: " + move)
-			self.reader.board_lock.release()
+			self.board_lock.release()
 			return
 	
 	def update_board_with_opponent_move(self, move):
 		"""
 		Update the board and send the new configuration to the Arduino.
-
 		Args:
 			move (_type_): _description_
 		"""
-		self.reader.board_lock.acquire()
-		self.reader.board.push_uci(move)
-		self.reader.board_lock.release()
+		self.board_lock.acquire()
+		self.board.push_uci(move)
+		self.board_lock.release()
 		self.send_board_to_arduino()
+		self.send_last_move_to_arduino()
+
+	def send_last_move_to_arduino(self):
+		"""
+		Send the move to the Arduino
+		"""
+		move = self.board.peek().uci().encode()
+		self.arduino.send_serial_data(BOARD_MOVE.to_bytes() + self.board.peek().uci().encode() + b'\n')
 
 	def send_board_to_arduino(self):
 		"""
@@ -236,7 +244,7 @@ class Reader(threading.Thread):
 		"""
 		# This generates the configuration of the current board as a bytearray by converting every piece to its
 		# ASCII value
-		board_matrix = bytearray([ord(self.board.piece_map()[x].symbol()) if x in list(self.board.piece_map()) else 1 for x in chess.SQUARES])
+		board_matrix = bytearray([ord(self.board.piece_map()[x].symbol()) if x in list(self.board.piece_map()) else EMPTY_SPACE for x in chess.SQUARES])
 		# Before sending the data to the arduino, we add the header byte and a newline at the end
 		board_matrix = bytes(BOARD_STATE_CHANGE.to_bytes() + board_matrix + ord('\n').to_bytes())
 		# Finally, send the data to the ARDUINO
@@ -286,9 +294,6 @@ class Reader(threading.Thread):
 				data = b''.join(reversed([data[x:x+8] for x in range(0, len(data), 8)]))
 				# Only make a move if its your turn
 				self.update_current_board(data)
-				self.send_board_to_arduino() # TODO: remove this
-			else:
-				print(data)
 			# TODO: Send an OTB request from the bot_friend to the main bot if the arduino requests this
 			# if command == START_OTB
 				# self.is_otb = True
@@ -327,6 +332,7 @@ class Game(threading.Thread):
 		self.client.bots.make_move(self.game_id, self.reader.board.peek().uci())
 		self.reader.move_event.clear()
 		self.reader.send_board_to_arduino()
+		self.reader.send_last_move_to_arduino()
 
 	def run(self):
 		"""
@@ -370,7 +376,7 @@ class Game(threading.Thread):
 			except IndexError:
 				# No move has been added to the board yet
 				pass
-			self.reader.update_board_with_opponent_move()
+			self.reader.update_board_with_opponent_move(last_move)
 			self.spawn_move_thread()
 		elif game_state['status'] == 'aborted' or game_state['status'] == 'mate' or game_state['status'] == 'resign' or game_state['status'] == 'outoftime' or game_state['status'] == 'stalemate':
 			# Maybe add these in a list and check if the status is in the list
@@ -444,6 +450,7 @@ if __name__ == '__main__':
 	# TO DO: Start reader as daemon. All clients use the same reader.
 	client = start_session("./utils/.token")
 	client_2 = start_session("./utils/.token2")
+	# client_2.challenges.create(client.account.get()['id'], rated=False)
 
 	board_lock = threading.Lock()
 	move_event = threading.Event()
@@ -451,26 +458,23 @@ if __name__ == '__main__':
 	reader.daemon = True
 	reader.start()
 
-	while True:
-		sleep(1000)
-
-	# stream = client.board.stream_incoming_events()
-	# for event in stream:
-	# 	print("Received event: {event}".format(event=event))
-	# 	if event['type'] == 'challenge':
-	# 		client.bots.accept_challenge(event['challenge']['id'])
-	# 	elif event['type'] == 'gameStart' and not reader.is_otb:
-	# 		reader.new_game_setup(gameStartEvent = event)
-	# 		game = Game(client = client, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = reader.color)
-	# 		game.start()
-	# 		threading.Thread.join(game)
-	# 	elif event['type'] == 'gameStart' and reader.is_otb:
-	# 		reader.new_game_setup(gameStartEvent = event)
-	# 		bot_color = event['game']['color'] == 'white'
-	# 		game_bot = Game(client = client, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = bot_color)
-	# 		game_bot_friend = Game(client = client_2, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = not bot_color)
-	# 		l = [game_bot, game_bot_friend]
-	# 		for bot in l:
-	# 			bot.start()
-	# 		for bot in l:
-	# 			threading.Thread.join(bot)
+	stream = client.board.stream_incoming_events()
+	for event in stream:
+		print("Received event: {event}".format(event=event))
+		if event['type'] == 'challenge':
+			client.bots.accept_challenge(event['challenge']['id'])
+		elif event['type'] == 'gameStart' and not reader.is_otb:
+			reader.new_game_setup(gameStartEvent = event)
+			game = Game(client = client, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = reader.color)
+			game.start()
+			threading.Thread.join(game)
+		elif event['type'] == 'gameStart' and reader.is_otb:
+			reader.new_game_setup(gameStartEvent = event)
+			bot_color = event['game']['color'] == 'white'
+			game_bot = Game(client = client, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = bot_color)
+			game_bot_friend = Game(client = client_2, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = not bot_color)
+			l = [game_bot, game_bot_friend]
+			for bot in l:
+				bot.start()
+			for bot in l:
+				threading.Thread.join(bot)

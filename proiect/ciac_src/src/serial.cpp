@@ -5,7 +5,7 @@ void send_chessboard()
     /* Send the chessboard to the serial port from the eight rank to the first rank
      * and from the first file to the eighth file.
     */
-    Serial.write(BOARD_STATE_BYTE);  // B for board
+    Serial.write(BOARD_STATE);  // B for board
     Serial.write(chessboard, RANKS * FILES);
     Serial.write('\n');
 }
