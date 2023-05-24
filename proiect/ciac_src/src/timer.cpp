@@ -1,25 +1,11 @@
 #include "utils.h"
-void setup_timers(void) {
-	// cli();
-	// // TIMER 0 - used for reading the board every 500ms
-	// TCCR0A = 0; // set entire TCCR0A register to 0
-	// TCCR0B = 0; // same for TCCR0B
-	// TCNT0  = 0; // initialize counter value to 0
-	// // set compare match register for 500 Hz increments
-	// OCR0A = 124; // = 16000000 / (256 * 500) - 1 (must be <256)
-	// // turn on CTC mode
-	// TCCR0A |= (1 << WGM01);
-	// // Set CS02, CS01 and CS00 bits for 256 prescaler
-	// TCCR0B |= (1 << CS02) | (0 << CS01) | (0 << CS00);
-	// // enable timer compare interrupt
-	// TIMSK0 |= (1 << OCIE0A);
-	// sei(); // allow interrupts
-
+void setup_timers(void)
+{
 	cli();
 	// TIMER 1 - used for updating the display time
 	TCCR1A = 0; // set entire TCCR1A register to 0
 	TCCR1B = 0; // same for TCCR1B
-	TCNT1  = 0; // initialize counter value to 0
+	TCNT1 = 0;	// initialize counter value to 0
 	// set compare match register for 1 Hz increments
 	OCR1A = 62499; // = 16000000 / (256 * 1) - 1 (must be <65536)
 	// turn on CTC mode
@@ -32,10 +18,34 @@ void setup_timers(void) {
 	sei(); // allow interrupts
 }
 
-ISR(TIMER0_COMPA_vect){
-   //interrupt commands for TIMER 0 here
-}
+void update_time(const char *time_packet)
+{
+	/*  TIME PACKET FORMAT:
+		1 byte: Has the clock started
+		1 byte: Current turn
+		4 bytes: White time (big endian)
+		4 bytes: Black time (big endian)
+		1 byte: Newline character */
 
-ISR(TIMER1_COMPA_vect){
-   //interrupt commands for TIMER 1 here
+	clock_started = time_packet[0] != 0;
+	turn = time_packet[1] == WHITE;
+	white_time = 0;
+	black_time = 0;
+
+	/* TODO: REPLACE MAGIC NUMBERS */
+    for (int i = 0; i < 4; i++) {
+        white_time = (white_time << 8) | (time_packet[2 + i]);
+        black_time = (black_time << 8) | (time_packet[6 + i]);
+    }
+}
+ISR(TIMER1_COMPA_vect)
+{
+	if (clock_started) {
+		if (turn == WHITE) {
+			white_time--;
+		} else {
+			black_time--;
+		}
+		second_passed = true;
+	}
 }

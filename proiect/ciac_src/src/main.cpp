@@ -17,13 +17,15 @@ byte dataArray[10];
 const int selectPins[3] = {A4, A3, A2}; // S0~3, S1~4, S2~5
 const int zInput = PD7;					// Connect common (Z) to A0 (analog input)
 byte chessboard[64];					// Could be 8 bytes, but 64 bytes is easier to work with
+
 Ucglib_ILI9341_18x240x320_HWSPI ucg(/*cd=*/9, /*cs=*/10, /*reset=*/8);
-volatile int read_board = 1;
+// XPT2046 touch(/*cs=*/23, /*irq=*/ 3);
 TFT tft;
-lichess_time_t player_time = 0;
-lichess_time_t opponent_time = 0;
-volatile bool turn = 0; /* Compared against WHITE or BLACK */
-int first_board = 1;
+lichess_time_t white_time = 0;
+lichess_time_t black_time = 0;
+volatile bool turn = WHITE; /* Compared against WHITE or BLACK */
+volatile bool clock_started = false;
+volatile bool second_passed = true;
 
 void setup_button()
 {
@@ -63,15 +65,20 @@ void loop()
 		while (!readline(Serial.read(), serial_buff, BUFF_SIZE))
 			;
 
-		if (serial_buff[0] == BOARD_STATE) {
+		switch (serial_buff[0]) {
+		case BOARD_STATE:
 			/* This means we read a new board state sent by the python script */
 			for (int i = 0; i < RANKS * FILES; i++) {
 				tft.update_pieces(serial_buff + 1);
 			}
+			break;
+		case BOARD_MOVE:
+			tft.draw_last_move(serial_buff + 1);
+			break;
+		case BOARD_TIME:
+			update_time(serial_buff + 1);
+			break;
 		}
-		if (serial_buff[0] == BOARD_MOVE) {
-            tft.draw_last_move(serial_buff + 1);
-        }
 	}
 
 	if (buttonState) {

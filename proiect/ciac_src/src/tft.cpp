@@ -34,8 +34,8 @@ void TFT::draw_game(void)
 	/* TO DO: SEPARATE FUNCTION */
 	/* Draw rectangles above and below the chessboard where the time will be displayed */
 	ucg.setColor(128, 128, 128);
-	ucg.drawBox(time_opponent_x, time_opponent_y, time_width, time_height);
-	ucg.drawBox(time_player_x, time_player_y, time_width, time_height);
+	ucg.drawBox(time_black_x, time_black_y, time_width, time_height);
+	ucg.drawBox(time_white_x, time_white_y, time_width, time_height);
 
 	draw_chessboard();
 	draw_pieces();
@@ -47,31 +47,32 @@ void TFT::draw_game(void)
  * @param time_opponent
  * @param time_player
  */
-void TFT::draw_time(lichess_time_t time_opponent, lichess_time_t time_player)
+void TFT::draw_time(lichess_time_t white_time, lichess_time_t black_time)
 {
 	char text[100];
 	/* TODO: MACROS */
-	int hours_opponent = time_opponent / 3600;
-	int minutes_opponent = (time_opponent % 3600) / 60;
-	int seconds_opponent = (time_opponent % 3600) % 60;
-	int hours_player = time_player / 3600;
-	int minutes_player = (time_player % 3600) / 60;
-	int seconds_player = (time_player % 3600) % 60;
+	int hours_white = white_time / 3600;
+	int minutes_white = (white_time % 3600) / 60;
+	int seconds_white = (white_time % 3600) % 60;
+	int hours_black = black_time / 3600;
+	int minutes_black = (black_time % 3600) / 60;
+	int seconds_black = (black_time % 3600) % 60;
 
 	/* TODO: SEPARATE FUNCTIONS, MAYBE REDRAW ONLY A BOX IN WHICH THE TIME FITS */
-	ucg.setColor(128, 128, 128);
-	ucg.drawBox(time_opponent_x, time_opponent_y, time_width, time_height);
-	ucg.drawBox(time_player_x, time_player_y, time_width, time_height);
+	ucg.setColor(0, 0, 0);
+	ucg.drawBox(time_black_x, time_black_y, time_width, time_height);
+	ucg.setColor(255,255,255);
+	ucg.drawBox(time_white_x, time_white_y, time_width, time_height);
 
 	/* TODO: ONLY UPDATE THE TIME IF IT CHANGED. SELECT A BIGGER FONT. CENTER THE TIME. */
-	sprintf(text, "%02d:%02d:%02d", hours_opponent, minutes_opponent, seconds_opponent);
-	ucg.setColor(0, 0, 0); // Black color for the text
-	ucg.setPrintPos(time_opponent_x + 30, time_opponent_y + time_height / 2);
+	sprintf(text, "%02d:%02d:%02d", hours_black, minutes_black, seconds_black);
+	ucg.setColor(255,255,255); // Black color for the text
+	ucg.setPrintPos(time_black_x + time_ox_offset, ucg.getHeight() - time_white_y);
 	ucg.print(text);
 
-	sprintf(text, "%02d:%02d:%02d", hours_player, minutes_player, seconds_player);
+	sprintf(text, "%02d:%02d:%02d", hours_white, minutes_white, seconds_white);
 	ucg.setColor(0, 0, 0);
-	ucg.setPrintPos(time_player_x + 30, time_player_y + time_height / 2);
+	ucg.setPrintPos(time_white_x + time_ox_offset, time_white_y + time_oy_offset);
 	ucg.print(text);
 }
 
@@ -189,4 +190,31 @@ void TFT::draw_last_move(const char *move)
 	ucg.setColor(0, 0, 0); // Black color for the text
 	ucg.setPrintPos(last_move_x + 30, last_move_y + last_move_height);
 	ucg.print(text);
+}
+
+void TFT::draw_bitmap(void)
+{
+    /* TODO: ADD SWITCH CASE */
+
+	const uint8_t *bitmap = ChessFont25.bitmap;
+
+    for (int i = 0; i < 25; i++) {
+        GFXglyph *glyph = ChessFont25.glyph + i;
+        uint16_t offset = pgm_read_word_near(&glyph->bitmapOffset);
+        int pixel = 0;
+        for (int j = offset; j < offset + 79; j++) {
+            uint8_t c = pgm_read_byte_near(bitmap + j);
+            for (int k = 0; k < 8; k++) {
+                if (((c << k) & 0x80)) {
+                    ucg.setColor(128, 0, 0);
+                    ucg.drawPixel(pixel % 25, pixel / 25);
+                } else {
+                    ucg.setColor(255, 255, 255);
+                    ucg.drawPixel(pixel % 25, pixel / 25);
+                }
+                pixel++;
+            }
+        }
+    }
+
 }

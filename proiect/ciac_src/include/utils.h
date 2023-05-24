@@ -57,13 +57,12 @@ int readline(int readch, char *buffer, int len);
 #define TFT_H
 #include "Ucglib.h"
 #include <Adafruit_GFX.h>
+#include "Adafruit_ILI9341.h"
+#include "ChessFont25.h"
 #include <SPI.h>
 #include <pieces.h>
-typedef unsigned long long lichess_time_t;
+typedef unsigned int lichess_time_t;
 extern Ucglib_ILI9341_18x240x320_HWSPI ucg;
-extern lichess_time_t player_time;
-extern lichess_time_t opponent_time;
-extern volatile bool turn;
 
 class TFT
 {
@@ -77,6 +76,7 @@ class TFT
 	void draw_piece(char piece, int rank, int file);
 	void draw_pieces(void);
 	void draw_game(void);
+    void draw_bitmap(void);
 	void update_pieces(const char *new_board);
 
   private:
@@ -91,10 +91,12 @@ class TFT
 	/* Time boxes for players */
 	int time_height = 40;
 	int time_width = 240;
-	int time_opponent_x = 0;
-	int time_opponent_y = 0;
-	int time_player_x = 0;
-	int time_player_y = 280;
+	int time_black_x = 0;
+	int time_black_y = 0;
+	int time_white_x = 0;
+	int time_white_y = 280;
+    int time_ox_offset = 75;
+    int time_oy_offset = 20;
 	/* Last move box */
 	int last_move_height = 20;
 	int last_move_width = 240;
@@ -108,4 +110,10 @@ class TFT
 extern volatile int read_board;
 
 void setup_timers(void);
+void update_time(const char *time_packet);
+extern volatile bool turn;
+extern lichess_time_t white_time;
+extern lichess_time_t black_time;
+extern volatile bool clock_started;
+extern volatile bool second_passed;
 #endif
