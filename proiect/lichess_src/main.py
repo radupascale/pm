@@ -13,13 +13,16 @@ from time import sleep
 import msvcrt
 import subprocess
 import sys
+import datetime
 import logging
+import multiprocessing
 
 RANKS = 8
 FILES = 8
-EMPTY_SPACE = 32
-BOARD_STATE_CHANGE = 66
-BOARD_MOVE = 77
+EMPTY_SPACE = 32 # ASCII value for space
+BOARD_STATE_CHANGE = 66 # B
+BOARD_MOVE = 77 # M
+BOARD_TIME = 84 # T
 
 class Reader(threading.Thread):
 	def __init__(self, arduino : Arduino, board_lock : threading.Lock, move_event : threading.Event, client, client_2, debug = True,**kwargs):
@@ -103,7 +106,6 @@ class Reader(threading.Thread):
 					dest_square = chess.square_name(i * RANKS + j)
 
 		return src_square, dest_square
-
 
 	def check_takes(self, data, piece_map):
 		"""
@@ -231,6 +233,32 @@ class Reader(threading.Thread):
 		self.send_board_to_arduino()
 		self.send_last_move_to_arduino()
 
+	def send_time_to_arduino(self, wtime : datetime, btime : datetime):
+		"""
+		Send the time to the Arduino.
+			TIME PACKET FORMAT:
+			1 byte: Header byte
+			1 byte: Has the clock started
+			1 byte: Current turn
+			4 bytes: White time
+			4 bytes: Black time
+			1 byte: Newline character
+		"""
+		# First we check if the black player played a move. If he did, we send a message telling the Arduino
+		# to start timer count. Otherwise, we only need to send the Arduino the time values.
+		has_started = self.board.fullmove_number > 1
+
+		# Convert the time to seconds
+		wtime = int(wtime.timestamp())
+		btime = int(btime.timestamp())
+
+		# Convert the time to a bytearray
+		wtime = wtime.to_bytes(4, byteorder='big')
+		btime = btime.to_bytes(4, byteorder='big')
+
+		# Send the data to the arduino
+		self.arduino.send_serial_data(BOARD_TIME.to_bytes() + has_started.to_bytes() + self.board.turn.to_bytes() + wtime + btime + b'\n')
+
 	def send_last_move_to_arduino(self):
 		"""
 		Send the move to the Arduino
@@ -246,12 +274,15 @@ class Reader(threading.Thread):
 		# ASCII value
 		board_matrix = bytearray([ord(self.board.piece_map()[x].symbol()) if x in list(self.board.piece_map()) else EMPTY_SPACE for x in chess.SQUARES])
 		# Before sending the data to the arduino, we add the header byte and a newline at the end
-		board_matrix = bytes(BOARD_STATE_CHANGE.to_bytes() + board_matrix + ord('\n').to_bytes())
+		board_matrix = bytes(BOARD_STATE_CHANGE.to_bytes() + board_matrix + b'\n')
 		# Finally, send the data to the ARDUINO
 		self.arduino.send_serial_data(board_matrix)
 
 
 	def print_arduino_board(self, data):
+		if (len(data) != RANKS * FILES):
+			logging.error("Incorrect board configuration received from the Arduino.")
+			return
 		for i in range(RANKS):
 			for j in range(FILES):
 				if data[i * RANKS + j] == 1:
@@ -306,7 +337,7 @@ def start_session(token_path):
 		return berserk.Client(session=session)
 
 class Game(threading.Thread):
-	def __init__(self, client, gameID, arduino, reader : Reader, color, **kwargs):
+	def __init__(self, client : berserk.Client, gameID : str, arduino : Arduino, reader : Reader, color : bool, **kwargs):
 		super().__init__(**kwargs)
 		self.game_id = gameID
 		self.client = client
@@ -363,7 +394,7 @@ class Game(threading.Thread):
 			game_state (_type_): _description_
 		"""
 		if game_state['status'] == 'started' and self.reader.is_otb:
-			# If we are the client which played a move last turn, don't make a move.
+			# If we are the client which played a move last turn, don't make a move, just send the time to the arduino.
 			if self.color is not self.reader.board.turn:
 				return False
 			self.spawn_move_thread()
@@ -387,9 +418,11 @@ class Game(threading.Thread):
 		# Handle the board received from the Arduino, find out what move has been made, and if it is legal, send it to Lichess
 
 	def handle_chat_line(self, chat_line):
+		# TODO
 		pass
 
 	def handle_opponent_gone(self, opponent_gone):
+		# TODO
 		pass
 
 class Displayer(threading.Thread):
@@ -447,7 +480,6 @@ if __name__ == '__main__':
 	arduino = Arduino()
 
 	# Connect to the Lichess server using a bot account and listen for events
-	# TO DO: Start reader as daemon. All clients use the same reader.
 	client = start_session("./utils/.token")
 	client_2 = start_session("./utils/.token2")
 	# client_2.challenges.create(client.account.get()['id'], rated=False)
@@ -464,11 +496,13 @@ if __name__ == '__main__':
 		if event['type'] == 'challenge':
 			client.bots.accept_challenge(event['challenge']['id'])
 		elif event['type'] == 'gameStart' and not reader.is_otb:
+			# TODO: SEND TIME TO ARDUINO
 			reader.new_game_setup(gameStartEvent = event)
 			game = Game(client = client, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = reader.color)
 			game.start()
 			threading.Thread.join(game)
 		elif event['type'] == 'gameStart' and reader.is_otb:
+			# TODO: SEND TIME TO ARDUINO
 			reader.new_game_setup(gameStartEvent = event)
 			bot_color = event['game']['color'] == 'white'
 			game_bot = Game(client = client, arduino=arduino, gameID = event['game']['gameId'], reader = reader, color = bot_color)
