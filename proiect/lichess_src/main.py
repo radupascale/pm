@@ -10,12 +10,11 @@ import cv2
 import os
 from pprint import pprint
 from time import sleep
-import msvcrt
 import subprocess
 import sys
 import datetime
 import logging
-import multiprocessing
+import platform
 
 RANKS = 8
 FILES = 8
@@ -462,19 +461,30 @@ class Displayer(threading.Thread):
 		cv2.imshow(self.window_name, image)
 
 if __name__ == '__main__':
-	# Hardcoded variables to disable and enable the Arduino USB port before connecting to the serial port
-	# I have to run the program as administrator for this to work
-	# devcon = 'C:\\Program Files (x86)\\Windows Kits\\10\\Tools\\10.0.22621.0\\x64\\devcon.exe'
-	devcon = '.\\utils\\devcon.exe'
-	hwid = "USB\VID_1A86&PID_7523"
-	subprocess.run([devcon, 'disable', hwid])
-	subprocess.run([devcon, 'enable', hwid])
-
 	# Used for logging
 	logging.basicConfig(
 		format='%(asctime)s %(levelname)-8s %(message)s',
 		level=logging.INFO,
 		datefmt='%Y-%m-%d %H:%M:%S')
+	# Hardcoded variables to disable and enable the Arduino USB port before connecting to the serial port
+	# I have to run the program as administrator for this to work
+	if platform.system() == 'Linux':
+		# Run lsusb and get the bus and the device of CH340
+		logging.info("Running on Linux")
+		usbdevice = next(item for item in [x if 'CH340' in x else None for x in subprocess.run(['lsusb'], stdout = subprocess.PIPE).stdout.decode('utf-8').split('\n')] if item is not None).split()
+		usbdevice = '/dev/bus/usb/' + usbdevice[1] + '/' + usbdevice[3][:-1]
+
+		usbreset = './utils/usbreset'
+		ret = subprocess.run([usbreset, usbdevice])
+		if ret.returncode == 0:
+			logging.info("Successfully reset USB port")
+	else:
+		logging.info("Running on Windows")
+		devcon = '.\\utils\\devcon.exe'
+		hwid = "USB\VID_1A86&PID_7523"
+		subprocess.run([devcon, 'disable', hwid])
+		subprocess.run([devcon, 'enable', hwid])
+
 
 	# Connect to Arduino serial port
 	arduino = Arduino()
