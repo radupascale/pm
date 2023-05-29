@@ -20,7 +20,7 @@ RANKS = 8
 FILES = 8
 EMPTY_SPACE = 32 # ASCII value for space
 BOARD_STATE_CHANGE = 66 # B
-BOARD_MOVE = 77 # M
+BOARD_MOVE = 77 # Mol
 BOARD_TIME = 84 # T
 
 class Reader(threading.Thread):
@@ -503,11 +503,13 @@ if __name__ == '__main__':
 	# Connect to the Lichess server using a bot account and listen for events
 	client = start_session("./utils/.token")
 	client_2 = start_session("./utils/.token2")
-	# client_2.challenges.create(client.account.get()['id'], rated=False)
 
 	board_lock = threading.Lock()
 	move_event = threading.Event()
 	reader = Reader(arduino = arduino, board_lock = board_lock, move_event = move_event, debug = False, client = client, client_2 = client_2)
+	if len(sys.argv) > 1 and sys.argv[1] == '-o':
+		client_2.challenges.create(client.account.get()['id'], rated=False)
+		reader.is_otb = True
 	reader.daemon = True
 	reader.start()
 
