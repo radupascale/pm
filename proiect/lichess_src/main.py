@@ -282,14 +282,24 @@ class Reader(threading.Thread):
 		if (len(data) != RANKS * FILES):
 			logging.error("Incorrect board configuration received from the Arduino.")
 			return
-		for i in range(RANKS):
+		for i in range(7, -1, -1):
 			for j in range(FILES):
-				if data[i * RANKS + j] == 1:
+				if data[i * RANKS +j] == 1:
 					print("-", end=' ')
 				else:
 					print("X", end=' ')
 			print()
 		print()
+
+	def reverse_data(self, data):
+		"""
+		I connected the board in the wrong way, so I have to cleanse my sins in software.
+		"""
+		new_data = bytearray()
+		for i in range(RANKS):
+			for j in range(FILES):
+				new_data.append(data[i + j * FILES])
+		return new_data
 
 	def validate_position(self, data):
 		piece_map = self.board.piece_map()
@@ -318,10 +328,11 @@ class Reader(threading.Thread):
 			data = data.strip()[1:] # Remove the command byte and the newline character
 
 			if command == BOARD_STATE_CHANGE and self.color == self.board.turn:
+				data = self.reverse_data(data)
 				self.print_arduino_board(data)
 				# The data is received from the eight rank to the first rank and from the first file to the eighth file
 				# So we reverse it in chunks of 1 byte at a time to not get too confused with the indices
-				data = b''.join(reversed([data[x:x+8] for x in range(0, len(data), 8)]))
+				# data = b''.join(reversed([data[x:x+8] for x in range(0, len(data), 8)]))
 				# Only make a move if its your turn
 				self.update_current_board(data)
 			# TODO: Send an OTB request from the bot_friend to the main bot if the arduino requests this
