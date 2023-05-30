@@ -1,5 +1,6 @@
 import serial
 import serial.tools.list_ports
+import platform
 
 class Arduino():
 	def __init__(self):
@@ -14,6 +15,9 @@ class Arduino():
 			_type_: _description_
 		"""
 		driver = "CH340"
+		if platform.system() == 'Linux':
+			driver = "USB2.0-Ser!"
+
 		for p in serial.tools.list_ports.comports():
 			if driver in p.description:
 				self.device = p.device
