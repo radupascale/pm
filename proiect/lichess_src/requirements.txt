@@ -3,5 +3,5 @@ CairoSVG==2.7.0
 chess==1.9.4
 ipython==8.13.2
 opencv_python==4.7.0.72
-Pillow==10.1.0
+Pillow==10.3.0
 pyserial==3.5
